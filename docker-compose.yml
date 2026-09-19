@@ -1,0 +1,17 @@
+services:
+  rag-service:
+    build: .
+    container_name: enterprise_rag_agent
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    networks:
+      - isolated_internal_net
+    restart: unless-stopped
+
+networks:
+  isolated_internal_net:
+    driver: bridge
