@@ -2,18 +2,19 @@ import os
 import uuid
 import streamlit as st
 from dotenv import load_dotenv
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader, CSVLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_groq import ChatGroq
 from langchain_community.vectorstores import Chroma
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+from langchain_core.messages import HumanMessage, AIMessage
 
 load_dotenv()
 
-st.set_page_config(page_title="Enterprise Doc AI", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Enterprise Knowledge AI", page_icon="🏢", layout="wide")
 
 st.markdown("""
 <style>
@@ -22,6 +23,14 @@ st.markdown("""
 }
 a.header-anchor {
     display: none !important;
+}
+.source-tag {
+    background-color: #1f2937;
+    color: #93c5fd;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    font-family: monospace;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -43,7 +52,7 @@ if not groq_key:
     groq_key = os.getenv("GROQ_API_KEY")
 
 if not gemini_key or not groq_key:
-    st.error("Missing API Keys. Ensure both GEMINI_API_KEY and GROQ_API_KEY are configured.")
+    st.error("Missing credentials. Please configure GEMINI_API_KEY and GROQ_API_KEY in .env or Streamlit Secrets.")
     st.stop()
 
 if "session_id" not in st.session_state:
@@ -52,8 +61,16 @@ if "session_id" not in st.session_state:
 if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
 
-if "indexed_files" not in st.session_state:
-    st.session_state.indexed_files = []
+if "indexed_docs_meta" not in st.session_state:
+    st.session_state.indexed_docs_meta = {}
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+if "ui_messages" not in st.session_state:
+    st.session_state.ui_messages = [
+        {"role": "assistant", "content": "Hello! Upload enterprise files (PDF, DOCX, CSV, TXT, MD) to start contextual exploration."}
+    ]
 
 def get_embeddings():
     return GoogleGenerativeAIEmbeddings(
@@ -61,88 +78,167 @@ def get_embeddings():
         google_api_key=gemini_key
     )
 
+def get_collection_name():
+    return f"col_{st.session_state.session_id.replace('-', '_')}"
+
 with st.sidebar:
-    st.title("Document Knowledge Base")
-    st.markdown("Upload documents (PDF, TXT) to ground the AI responses.")
+    st.title("Knowledge Base")
+    st.markdown("Upload documents to ground responses in enterprise context.")
 
-    uploaded_file = st.file_uploader("Upload a document", type=["pdf", "txt"])
-    
+    uploaded_file = st.file_uploader(
+        "Supported: PDF, DOCX, CSV, TXT, MD",
+        type=["pdf", "docx", "csv", "txt", "md"]
+    )
+
     if uploaded_file and st.button("Index Document", use_container_width=True):
-        with st.spinner("Processing & vectorizing into private session..."):
-            temp_dir = os.path.join("temp_uploads", st.session_state.session_id)
-            os.makedirs(temp_dir, exist_ok=True)
-            temp_path = os.path.join(temp_dir, uploaded_file.name)
+        if uploaded_file.name in st.session_state.indexed_docs_meta:
+            st.warning(f"'{uploaded_file.name}' is already indexed in this session.")
+        else:
+            with st.spinner(f"Parsing & vectorizing {uploaded_file.name}..."):
+                temp_dir = os.path.join("temp_uploads", st.session_state.session_id)
+                os.makedirs(temp_dir, exist_ok=True)
+                temp_path = os.path.join(temp_dir, uploaded_file.name)
 
-            with open(temp_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
+                with open(temp_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
 
-            if temp_path.endswith(".pdf"):
-                loader = PyPDFLoader(temp_path)
-            else:
-                loader = TextLoader(temp_path)
+                file_size_kb = f"{round(len(uploaded_file.getbuffer()) / 1024, 1)} KB"
 
-            raw_docs = loader.load()
-            splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=40)
-            chunks = splitter.split_documents(raw_docs)
+                ext = uploaded_file.name.split(".")[-1].lower()
+                try:
+                    if ext == "pdf":
+                        loader = PyPDFLoader(temp_path)
+                    elif ext == "docx":
+                        loader = Docx2txtLoader(temp_path)
+                    elif ext == "csv":
+                        loader = CSVLoader(temp_path)
+                    else:
+                        loader = TextLoader(temp_path, encoding="utf-8")
+                    
+                    raw_docs = loader.load()
+                except Exception as load_err:
+                    st.error(f"Failed to load file: {load_err}")
+                    raw_docs = []
 
-            if st.session_state.vector_store is None:
-                st.session_state.vector_store = Chroma.from_documents(
-                    documents=chunks,
-                    embedding=get_embeddings(),
-                    collection_name=f"col_{st.session_state.session_id.replace('-', '_')}"
-                )
-            else:
-                st.session_state.vector_store.add_documents(chunks)
+                if raw_docs:
+                    splitter = RecursiveCharacterTextSplitter(chunk_size=450, chunk_overlap=50)
+                    chunks = splitter.split_documents(raw_docs)
 
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+                    chunk_ids = []
+                    for idx, chunk in enumerate(chunks):
+                        c_id = f"{uploaded_file.name}_{idx}_{uuid.uuid4().hex[:6]}"
+                        chunk.metadata["source_name"] = uploaded_file.name
+                        chunk.metadata["page_number"] = chunk.metadata.get("page", 1)
+                        chunk_ids.append(c_id)
 
-            st.session_state.indexed_files.append(uploaded_file.name)
-            st.success(f"Indexed {len(chunks)} chunks from {uploaded_file.name}!")
+                    if st.session_state.vector_store is None:
+                        st.session_state.vector_store = Chroma.from_documents(
+                            documents=chunks,
+                            embedding=get_embeddings(),
+                            ids=chunk_ids,
+                            collection_name=get_collection_name()
+                        )
+                    else:
+                        st.session_state.vector_store.add_documents(documents=chunks, ids=chunk_ids)
 
-    if st.session_state.indexed_files:
-        st.markdown("**Currently Indexed in This Session:**")
-        for f in set(st.session_state.indexed_files):
-            st.caption(f"• {f}")
+                    st.session_state.indexed_docs_meta[uploaded_file.name] = {
+                        "chunks": len(chunks),
+                        "size": file_size_kb,
+                        "ids": chunk_ids
+                    }
+                    st.success(f"Indexed {len(chunks)} chunks from {uploaded_file.name}!")
+
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+    st.markdown("---")
+    st.subheader("Active Documents")
+    
+    if st.session_state.indexed_docs_meta:
+        for fname, meta in list(st.session_state.indexed_docs_meta.items()):
+            col_info, col_del = st.columns([0.8, 0.2])
+            with col_info:
+                st.caption(f"📄 **{fname}**")
+                st.caption(f"{meta['chunks']} chunks • {meta['size']}")
+            with col_del:
+                if st.button("🗑️", key=f"del_{fname}", help=f"Remove {fname}"):
+                    if st.session_state.vector_store is not None:
+                        st.session_state.vector_store.delete(ids=meta["ids"])
+                    del st.session_state.indexed_docs_meta[fname]
+                    if len(st.session_state.indexed_docs_meta) == 0:
+                        st.session_state.vector_store = None
+                    st.rerun()
+            st.markdown("<hr style='margin: 4px 0;' />", unsafe_allow_html=True)
+    else:
+        st.caption("No documents currently active in this session.")
+
+    st.markdown("---")
+    if len(st.session_state.ui_messages) > 1:
+        export_md = "# Enterprise Knowledge AI - Session Transcript\n\n"
+        for m in st.session_state.ui_messages:
+            role = "User" if m["role"] == "user" else "Assistant"
+            export_md += f"### {role}\n{m['content']}\n\n"
+        st.download_button(
+            label="📥 Export Chat (.md)",
+            data=export_md,
+            file_name=f"chat_transcript_{st.session_state.session_id[:8]}.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
 
     if st.button("Clear Chat & Session", use_container_width=True):
-        st.session_state.messages = [
-            {"role": "assistant", "content": "Hello! I am ready to answer any questions about your indexed documents."}
+        st.session_state.ui_messages = [
+            {"role": "assistant", "content": "Session reset. Upload new documents to begin."}
         ]
+        st.session_state.chat_history = []
         st.session_state.vector_store = None
-        st.session_state.indexed_files = []
+        st.session_state.indexed_docs_meta = {}
         st.rerun()
 
 st.header("Enterprise Assistant")
 
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "Hello! Upload a document in the sidebar, and I will answer questions based strictly on its contents."}
-    ]
-
-for msg in st.session_state.messages:
+for msg in st.session_state.ui_messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if "sources" in msg and msg["sources"]:
-            with st.expander("View Retrieved Sources"):
-                for idx, src in enumerate(msg["sources"], 1):
-                    st.caption(f"**Chunk {idx}:**")
-                    st.text(src)
+            with st.expander("🔍 View Retrieved Sources"):
+                for src in msg["sources"]:
+                    st.markdown(f"<span class='source-tag'>Source: {src['source']} (Page {src['page']})</span> • Relevance: `{src['score']}%`", unsafe_allow_html=True)
+                    st.caption(src["text"])
+                    st.markdown("---")
 
-if user_prompt := st.chat_input("Ask a question about your documents..."):
-    if st.session_state.vector_store is None:
-        st.warning("Please upload and index a document in the sidebar first!")
+if user_prompt := st.chat_input("Ask about your documents..."):
+    if st.session_state.vector_store is None or not st.session_state.indexed_docs_meta:
+        st.warning("Please upload and index at least one document in the sidebar first!")
         st.stop()
 
-    st.session_state.messages.append({"role": "user", "content": user_prompt})
+    st.session_state.ui_messages.append({"role": "user", "content": user_prompt})
     with st.chat_message("user"):
         st.markdown(user_prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Searching context & generating response with Groq..."):
-            retriever = st.session_state.vector_store.as_retriever(search_kwargs={"k": 4})
-            retrieved_docs = retriever.invoke(user_prompt)
-            sources = [doc.page_content for doc in retrieved_docs]
+        with st.spinner("Analyzing context and generating response..."):
+            docs_and_scores = st.session_state.vector_store.similarity_search_with_relevance_scores(user_prompt, k=4)
+            
+            structured_sources = []
+            context_pieces = []
+            for doc, score in docs_and_scores:
+                rel_percentage = round((score if score is not None else 0.85) * 100, 1)
+                page_val = doc.metadata.get("page_number", doc.metadata.get("page", 1))
+                source_name = doc.metadata.get("source_name", "Document")
+                
+                structured_sources.append({
+                    "source": source_name,
+                    "page": page_val,
+                    "score": max(0, min(100, rel_percentage)),
+                    "text": doc.page_content
+                })
+                context_pieces.append(f"[{source_name} - Page {page_val}]:\n{doc.page_content}")
+
+            context_str = "\n\n---\n\n".join(context_pieces)
+
+            if "chat_history" not in st.session_state:
+                st.session_state.chat_history = []
 
             llm = ChatGroq(
                 model_name="openai/gpt-oss-120b",
@@ -150,18 +246,25 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                 temperature=0.1
             )
 
-            prompt = ChatPromptTemplate.from_template(
-                "You are an enterprise AI assistant. Answer using ONLY the provided context:\n\n"
-                "Context:\n{context}\n\n"
-                "Question: {question}"
-            )
+            qa_prompt = ChatPromptTemplate.from_messages([
+                ("system", 
+                 "You are an enterprise knowledge assistant. Answer the user question accurately using ONLY the provided context snippets.\n"
+                 "If the answer cannot be determined from the context, state that clearly.\n\n"
+                 "Context Snippets:\n{context}"),
+                MessagesPlaceholder(variable_name="chat_history"),
+                ("human", "{question}")
+            ])
 
-            def format_docs(docs):
-                return "\n\n".join(doc.page_content for doc in docs)
+            # Extract memory locally to avoid Streamlit thread context failure
+            recent_history = list(st.session_state.get("chat_history", []))[-6:]
 
             rag_chain = (
-                {"context": lambda x: format_docs(retrieved_docs), "question": RunnablePassthrough()}
-                | prompt
+                {
+                    "context": lambda x: context_str,
+                    "chat_history": lambda x: recent_history,
+                    "question": RunnablePassthrough()
+                }
+                | qa_prompt
                 | llm
                 | StrOutputParser()
             )
@@ -169,18 +272,23 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
             try:
                 answer = rag_chain.invoke(user_prompt)
                 st.markdown(answer)
+
+                st.session_state.chat_history.append(HumanMessage(content=user_prompt))
+                st.session_state.chat_history.append(AIMessage(content=answer))
+
             except Exception as e:
                 st.error(f"Inference Error: {e}")
                 st.stop()
 
-            if sources:
-                with st.expander("View Retrieved Sources"):
-                    for idx, src in enumerate(sources, 1):
-                        st.caption(f"**Chunk {idx}:**")
-                        st.text(src)
+            if structured_sources:
+                with st.expander("🔍 View Retrieved Sources"):
+                    for src in structured_sources:
+                        st.markdown(f"<span class='source-tag'>Source: {src['source']} (Page {src['page']})</span> • Relevance: `{src['score']}%`", unsafe_allow_html=True)
+                        st.caption(src["text"])
+                        st.markdown("---")
 
-            st.session_state.messages.append({
+            st.session_state.ui_messages.append({
                 "role": "assistant",
                 "content": answer,
-                "sources": sources
+                "sources": structured_sources
             })

@@ -10,3 +10,5 @@ python-dotenv
 langchain-groq
 
 langchain-groq
+
+docx2txt
