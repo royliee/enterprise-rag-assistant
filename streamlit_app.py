@@ -145,7 +145,7 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
             sources = [doc.page_content for doc in retrieved_docs]
 
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
+                model="gemini-3.6-flash",
                 google_api_key=api_key
             )
 
