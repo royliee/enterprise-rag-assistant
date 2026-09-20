@@ -7,3 +7,6 @@ venv/
 mcp_data/
 
 mcp_data/
+
+opt/
+__MACOSX/
