@@ -81,6 +81,7 @@ def get_embeddings():
 def get_collection_name():
     return f"col_{st.session_state.session_id.replace('-', '_')}"
 
+# --- Sidebar Management ---
 with st.sidebar:
     st.title("Knowledge Base")
     st.markdown("Upload documents to ground responses in enterprise context.")
@@ -195,6 +196,7 @@ with st.sidebar:
         st.session_state.indexed_docs_meta = {}
         st.rerun()
 
+# --- Main Window Interface ---
 st.header("Enterprise Assistant")
 
 for msg in st.session_state.ui_messages:
@@ -207,7 +209,24 @@ for msg in st.session_state.ui_messages:
                     st.caption(src["text"])
                     st.markdown("---")
 
-if user_prompt := st.chat_input("Ask about your documents..."):
+# Clickable starter chips shown strictly before the first user question
+chip_prompt = None
+if st.session_state.indexed_docs_meta and len(st.session_state.ui_messages) <= 1:
+    st.markdown("**Suggested Prompts:**")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("📌 Summarize Key Points", use_container_width=True):
+            chip_prompt = "Provide an executive summary of the key points in this document."
+    with c2:
+        if st.button("🎯 Extract Main Skills / Topics", use_container_width=True):
+            chip_prompt = "What are the main skills, competencies, or topics covered across the documents?"
+    with c3:
+        if st.button("📅 Extract Dates & Milestones", use_container_width=True):
+            chip_prompt = "List all dates, timelines, and milestones mentioned in these documents."
+
+user_prompt = st.chat_input("Ask about your documents...") or chip_prompt
+
+if user_prompt:
     if st.session_state.vector_store is None or not st.session_state.indexed_docs_meta:
         st.warning("Please upload and index at least one document in the sidebar first!")
         st.stop()
@@ -217,13 +236,13 @@ if user_prompt := st.chat_input("Ask about your documents..."):
         st.markdown(user_prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Analyzing context and generating response..."):
-            docs_and_scores = st.session_state.vector_store.similarity_search_with_relevance_scores(user_prompt, k=4)
-            
-            structured_sources = []
-            context_pieces = []
-            for doc, score in docs_and_scores:
-                rel_percentage = round((score if score is not None else 0.85) * 100, 1)
+        docs_and_scores = st.session_state.vector_store.similarity_search_with_relevance_scores(user_prompt, k=4)
+        
+        structured_sources = []
+        context_pieces = []
+        for doc, score in docs_and_scores:
+            rel_percentage = round((score if score is not None else 0.85) * 100, 1)
+            if rel_percentage >= 45.0:
                 page_val = doc.metadata.get("page_number", doc.metadata.get("page", 1))
                 source_name = doc.metadata.get("source_name", "Document")
                 
@@ -235,15 +254,22 @@ if user_prompt := st.chat_input("Ask about your documents..."):
                 })
                 context_pieces.append(f"[{source_name} - Page {page_val}]:\n{doc.page_content}")
 
+        if not context_pieces:
+            fallback_answer = "The indexed documents do not contain sufficiently relevant information to answer this question."
+            st.markdown(fallback_answer)
+            st.session_state.ui_messages.append({
+                "role": "assistant",
+                "content": fallback_answer,
+                "sources": []
+            })
+        else:
             context_str = "\n\n---\n\n".join(context_pieces)
-
-            if "chat_history" not in st.session_state:
-                st.session_state.chat_history = []
 
             llm = ChatGroq(
                 model_name="openai/gpt-oss-120b",
                 groq_api_key=groq_key,
-                temperature=0.1
+                temperature=0.1,
+                streaming=True
             )
 
             qa_prompt = ChatPromptTemplate.from_messages([
@@ -255,7 +281,7 @@ if user_prompt := st.chat_input("Ask about your documents..."):
                 ("human", "{question}")
             ])
 
-            # Extract memory locally to avoid Streamlit thread context failure
+            # Extract memory locally to preserve thread safety in Streamlit
             recent_history = list(st.session_state.get("chat_history", []))[-6:]
 
             rag_chain = (
@@ -270,8 +296,7 @@ if user_prompt := st.chat_input("Ask about your documents..."):
             )
 
             try:
-                answer = rag_chain.invoke(user_prompt)
-                st.markdown(answer)
+                answer = st.write_stream(rag_chain.stream(user_prompt))
 
                 st.session_state.chat_history.append(HumanMessage(content=user_prompt))
                 st.session_state.chat_history.append(AIMessage(content=answer))
