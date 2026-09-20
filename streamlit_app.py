@@ -1,5 +1,5 @@
 ﻿import os
-import shutil
+import uuid
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
@@ -29,10 +29,15 @@ if not api_key:
     st.error("Missing Gemini API Key. Please configure it in your secrets or .env file.")
     st.stop()
 
-DB_DIR = "data/chroma_db"
-DOCS_DIR = "data/docs"
-os.makedirs(DOCS_DIR, exist_ok=True)
-os.makedirs(DB_DIR, exist_ok=True)
+# Initialize unique session identifier and session-isolated storage
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+
+if "vector_store" not in st.session_state:
+    st.session_state.vector_store = None
+
+if "indexed_files" not in st.session_state:
+    st.session_state.indexed_files = []
 
 def get_embeddings():
     return GoogleGenerativeAIEmbeddings(
@@ -40,40 +45,59 @@ def get_embeddings():
         google_api_key=api_key
     )
 
-@st.cache_resource
-def load_vector_store():
-    return Chroma(persist_directory=DB_DIR, embedding_function=get_embeddings())
-
 # --- Sidebar: Document Management ---
 with st.sidebar:
     st.title("📁 Document Knowledge Base")
     st.markdown("Upload documents (PDF, TXT) to ground the AI responses.")
 
     uploaded_file = st.file_uploader("Upload a document", type=["pdf", "txt"])
+    
     if uploaded_file and st.button("Index Document", use_container_width=True):
-        with st.spinner("Processing & vectorizing into ChromaDB..."):
-            save_path = os.path.join(DOCS_DIR, uploaded_file.name)
-            with open(save_path, "wb") as f:
+        with st.spinner("Processing & vectorizing into your private session..."):
+            temp_dir = os.path.join("temp_uploads", st.session_state.session_id)
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_path = os.path.join(temp_dir, uploaded_file.name)
+
+            with open(temp_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
 
-            if save_path.endswith(".pdf"):
-                loader = PyPDFLoader(save_path)
+            if temp_path.endswith(".pdf"):
+                loader = PyPDFLoader(temp_path)
             else:
-                loader = TextLoader(save_path)
+                loader = TextLoader(temp_path)
 
             raw_docs = loader.load()
             splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=40)
             chunks = splitter.split_documents(raw_docs)
 
-            vector_store = load_vector_store()
-            vector_store.add_documents(chunks)
-            st.cache_resource.clear()
-            st.success(f"Successfully indexed {len(chunks)} chunks from {uploaded_file.name}!")
+            # Isolated in-memory Chroma instance with a unique collection name per session
+            if st.session_state.vector_store is None:
+                st.session_state.vector_store = Chroma.from_documents(
+                    documents=chunks,
+                    embedding=get_embeddings(),
+                    collection_name=f"col_{st.session_state.session_id.replace('-', '_')}"
+                )
+            else:
+                st.session_state.vector_store.add_documents(chunks)
 
-    if st.button("Clear Chat History", use_container_width=True):
+            # Clean up uploaded raw file from disk
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+            st.session_state.indexed_files.append(uploaded_file.name)
+            st.success(f"Indexed {len(chunks)} chunks from {uploaded_file.name}!")
+
+    if st.session_state.indexed_files:
+        st.markdown("**Currently Indexed in This Session:**")
+        for f in set(st.session_state.indexed_files):
+            st.caption(f"• {f}")
+
+    if st.button("Clear Chat & Session", use_container_width=True):
         st.session_state.messages = [
             {"role": "assistant", "content": "Hello! I am ready to answer any questions about your indexed documents."}
         ]
+        st.session_state.vector_store = None
+        st.session_state.indexed_files = []
         st.rerun()
 
 # --- Main Window: ChatGPT Interface ---
@@ -81,7 +105,7 @@ st.header("💬 Enterprise Assistant")
 
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "Hello! I am ready to answer any questions about your indexed documents."}
+        {"role": "assistant", "content": "Hello! Upload a document in the sidebar, and I will answer questions based strictly on its contents."}
     ]
 
 for msg in st.session_state.messages:
@@ -94,14 +118,17 @@ for msg in st.session_state.messages:
                     st.text(src)
 
 if user_prompt := st.chat_input("Ask a question about your documents..."):
+    if st.session_state.vector_store is None:
+        st.warning("Please upload and index a document in the sidebar first!")
+        st.stop()
+
     st.session_state.messages.append({"role": "user", "content": user_prompt})
     with st.chat_message("user"):
         st.markdown(user_prompt)
 
     with st.chat_message("assistant"):
         with st.spinner("Searching context & generating response..."):
-            vector_store = load_vector_store()
-            retriever = vector_store.as_retriever(search_kwargs={"k": 6})
+            retriever = st.session_state.vector_store.as_retriever(search_kwargs={"k": 4})
             retrieved_docs = retriever.invoke(user_prompt)
             sources = [doc.page_content for doc in retrieved_docs]
 
