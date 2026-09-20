@@ -145,7 +145,7 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
             sources = [doc.page_content for doc in retrieved_docs]
 
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash",
+                model="gemini-2.0-flash",
                 google_api_key=api_key
             )
 
@@ -165,7 +165,11 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                 | StrOutputParser()
             )
 
-            answer = rag_chain.invoke(user_prompt)
+            try:
+                answer = rag_chain.invoke(user_prompt)
+            except Exception as e:
+                st.error(f"AI Service Error: {e}")
+                st.stop()
             st.markdown(answer)
 
             if sources:
