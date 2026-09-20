@@ -1,5 +1,6 @@
 import os
 import uuid
+import re
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
@@ -8,6 +9,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_groq import ChatGroq
 from langchain_community.vectorstores import Chroma
+from langchain_community.retrievers import BM25Retriever
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
@@ -36,7 +38,7 @@ a.header-anchor {
 </style>
 """, unsafe_allow_html=True)
 
-# API Keys
+# API Keys Retrieval
 gemini_key = None
 groq_key = None
 
@@ -57,11 +59,18 @@ if not gemini_key or not groq_key:
     st.error("Missing credentials. Please configure GEMINI_API_KEY and GROQ_API_KEY in .env or Streamlit Secrets.")
     st.stop()
 
+# Session State Initialization
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
 if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
+
+if "bm25_retriever" not in st.session_state:
+    st.session_state.bm25_retriever = None
+
+if "all_chunks" not in st.session_state:
+    st.session_state.all_chunks = []
 
 if "indexed_docs_meta" not in st.session_state:
     st.session_state.indexed_docs_meta = {}
@@ -86,23 +95,53 @@ def get_embeddings():
 def get_collection_name():
     return f"col_{st.session_state.session_id.replace('-', '_')}"
 
-def expand_query(raw_query: str, groq_api_key: str) -> str:
-    """Expands conversational queries into document-searchable keywords without guessing answers."""
+def condense_query_with_history(current_query: str, chat_history: list, api_key: str) -> str:
+    """Coreference resolution: Converts follow-ups into standalone search queries using past turns."""
+    if not chat_history:
+        return current_query
+    
     try:
-        fast_llm = ChatGroq(model_name="openai/gpt-oss-20b", groq_api_key=groq_api_key, temperature=0.0)
-        prompt = (
-            f"You are a search query optimizer for enterprise document retrieval. "
-            f"Given the user's question, output 3 to 5 synonymous search keywords or phrases that might appear in a formal resume or corporate document.\n"
-            f"Do not guess answers. Return ONLY the search terms separated by space.\n\n"
-            f"Question: {raw_query}\n"
-            f"Keywords:"
-        )
-        expanded = fast_llm.invoke(prompt).content.strip()
-        return f"{raw_query} {expanded}"
-    except Exception:
-        return raw_query
+        fast_llm = ChatGroq(model_name="openai/gpt-oss-20b", groq_api_key=api_key, temperature=0.0)
+        history_summary = []
+        for msg in chat_history[-4:]:
+            role = "User" if isinstance(msg, HumanMessage) else "Assistant"
+            history_summary.append(f"{role}: {msg.content}")
+        history_str = "\n".join(history_summary)
 
-# --- Sidebar ---
+        condense_prompt = (
+            f"Given the ongoing dialogue and a new question, formulate a standalone search query "
+            f"that includes all relevant entity names and context from the chat history. "
+            f"If the question is already self-contained, output it unchanged. Output ONLY the standalone query.\n\n"
+            f"Chat History:\n{history_str}\n\n"
+            f"Follow-up Question: {current_query}\n"
+            f"Standalone Query:"
+        )
+        reformulated = fast_llm.invoke(condense_prompt).content.strip()
+        return reformulated if reformulated else current_query
+    except Exception:
+        return current_query
+
+def perform_hybrid_search(query: str, k: int = 6) -> list:
+    """Combines BM25 keyword matching and Chroma dense semantic vectors via Reciprocal Rank Fusion (RRF)."""
+    vector_docs = st.session_state.vector_store.similarity_search(query, k=k) if st.session_state.vector_store else []
+    bm25_docs = st.session_state.bm25_retriever.invoke(query)[:k] if st.session_state.bm25_retriever else []
+
+    rrf_scores = {}
+    doc_map = {}
+
+    def add_docs(docs):
+        for rank, doc in enumerate(docs):
+            key = doc.page_content.strip()
+            doc_map[key] = doc
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + (1.0 / (60.0 + rank + 1.0))
+
+    add_docs(vector_docs)
+    add_docs(bm25_docs)
+
+    sorted_keys = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
+    return [doc_map[k_text] for k_text in sorted_keys[:k]]
+
+# --- Sidebar Management ---
 with st.sidebar:
     st.title("Knowledge Base")
     st.markdown("Upload documents to ground responses in enterprise context.")
@@ -172,6 +211,9 @@ with st.sidebar:
                     else:
                         st.session_state.vector_store.add_documents(documents=chunks, ids=chunk_ids)
 
+                    st.session_state.all_chunks.extend(chunks)
+                    st.session_state.bm25_retriever = BM25Retriever.from_documents(st.session_state.all_chunks)
+
                     st.session_state.indexed_docs_meta[uploaded_file.name] = {
                         "chunks": len(chunks),
                         "size": file_size_kb,
@@ -196,6 +238,15 @@ with st.sidebar:
                 if st.button("🗑️", key=f"del_{fname}", help=f"Remove {fname}"):
                     if st.session_state.vector_store is not None:
                         st.session_state.vector_store.delete(ids=meta["ids"])
+                    
+                    st.session_state.all_chunks = [
+                        c for c in st.session_state.all_chunks if c.metadata.get("source_name") != fname
+                    ]
+                    if st.session_state.all_chunks:
+                        st.session_state.bm25_retriever = BM25Retriever.from_documents(st.session_state.all_chunks)
+                    else:
+                        st.session_state.bm25_retriever = None
+
                     del st.session_state.indexed_docs_meta[fname]
                     if fname in st.session_state.indexed_dataframes:
                         del st.session_state.indexed_dataframes[fname]
@@ -231,6 +282,8 @@ with st.sidebar:
         ]
         st.session_state.chat_history = []
         st.session_state.vector_store = None
+        st.session_state.bm25_retriever = None
+        st.session_state.all_chunks = []
         st.session_state.indexed_docs_meta = {}
         st.session_state.indexed_dataframes = {}
         st.rerun()
@@ -286,12 +339,19 @@ if user_prompt:
             st.markdown(user_prompt)
 
     with st.chat_message("assistant"):
-        search_query = expand_query(user_prompt, groq_key)
-        matched_docs = st.session_state.vector_store.similarity_search(search_query, k=6)
+        # 1. Multi-Turn Coreference Resolution
+        search_query = condense_query_with_history(
+            user_prompt, 
+            st.session_state.chat_history, 
+            groq_key
+        )
+
+        # 2. Hybrid Search Retrieval (Dense Vector + Sparse BM25)
+        hybrid_docs = perform_hybrid_search(search_query, k=6)
 
         structured_sources = []
         context_pieces = []
-        for doc in matched_docs:
+        for doc in hybrid_docs:
             source_name = doc.metadata.get("source_name", "Document")
             page_val = doc.metadata.get("page_number", doc.metadata.get("page", 1))
 
@@ -323,10 +383,12 @@ if user_prompt:
             qa_prompt = ChatPromptTemplate.from_messages([
                 ("system", 
                  "You are an enterprise knowledge assistant. Answer the user question accurately using the provided context snippets.\n"
-                 "Analyze job titles, organization headers, dates, and related context thoroughly.\n"
-                 "Formatting rules:\n"
-                 "- Use standard Markdown only. Never output raw HTML tags like <br>, <br/>, or <div>.\n"
-                 "- Format bullet points using regular markdown lists (- item).\n"
+                 "Analyze job titles, organization headers, technical specifications, and related details thoroughly.\n\n"
+                 "Strict Formatting & Layout Rules:\n"
+                 "- Whenever grouping items by category, ALWAYS use bold titles or subheadings on their own separate line (e.g., '### Category Name' or '**Category Name:**'), followed by a blank line.\n"
+                 "- Separate distinct categories or sections with a full blank line so they never merge or crowd together.\n"
+                 "- Each bullet point under a category must start on a new line directly below the category header.\n"
+                 "- Use standard Markdown only (no raw HTML tags like <br>, <br/>, <div>, or <span>).\n"
                  "If the answer cannot be determined from the context, state that clearly.\n\n"
                  "Context Snippets:\n{context}"),
                 MessagesPlaceholder(variable_name="chat_history"),

@@ -15,3 +15,5 @@ docx2txt
 
 flashrank
 pandas
+
+rank-bm25
