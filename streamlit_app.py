@@ -12,7 +12,7 @@ from langchain_core.runnables import RunnablePassthrough
 
 load_dotenv()
 
-st.set_page_config(page_title="Enterprise Doc AI", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Enterprise Doc AI", page_icon="ðŸ¤–", layout="wide")
 
 # Hide header link anchors
 st.markdown("""
@@ -102,7 +102,7 @@ with st.sidebar:
     if st.session_state.indexed_files:
         st.markdown("**Currently Indexed in This Session:**")
         for f in set(st.session_state.indexed_files):
-            st.caption(f"â€¢ {f}")
+            st.caption(f"Ã¢â‚¬Â¢ {f}")
 
     if st.button("Clear Chat & Session", use_container_width=True):
         st.session_state.messages = [
@@ -145,7 +145,7 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
             sources = [doc.page_content for doc in retrieved_docs]
 
             llm = ChatGoogleGenerativeAI(
-                model="gemini-1.5-flash",
+                model="gemini-2.5-flash",
                 google_api_key=api_key
             )
 
