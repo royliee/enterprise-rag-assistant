@@ -12,3 +12,6 @@ langchain-groq
 langchain-groq
 
 docx2txt
+
+flashrank
+pandas

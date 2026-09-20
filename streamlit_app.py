@@ -1,5 +1,6 @@
 import os
 import uuid
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader, CSVLoader
@@ -35,6 +36,7 @@ a.header-anchor {
 </style>
 """, unsafe_allow_html=True)
 
+# API Keys
 gemini_key = None
 groq_key = None
 
@@ -64,6 +66,9 @@ if "vector_store" not in st.session_state:
 if "indexed_docs_meta" not in st.session_state:
     st.session_state.indexed_docs_meta = {}
 
+if "indexed_dataframes" not in st.session_state:
+    st.session_state.indexed_dataframes = {}
+
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
@@ -81,7 +86,23 @@ def get_embeddings():
 def get_collection_name():
     return f"col_{st.session_state.session_id.replace('-', '_')}"
 
-# --- Sidebar Management ---
+def expand_query(raw_query: str, groq_api_key: str) -> str:
+    """Expands conversational queries into document-searchable keywords without guessing answers."""
+    try:
+        fast_llm = ChatGroq(model_name="openai/gpt-oss-20b", groq_api_key=groq_api_key, temperature=0.0)
+        prompt = (
+            f"You are a search query optimizer for enterprise document retrieval. "
+            f"Given the user's question, output 3 to 5 synonymous search keywords or phrases that might appear in a formal resume or corporate document.\n"
+            f"Do not guess answers. Return ONLY the search terms separated by space.\n\n"
+            f"Question: {raw_query}\n"
+            f"Keywords:"
+        )
+        expanded = fast_llm.invoke(prompt).content.strip()
+        return f"{raw_query} {expanded}"
+    except Exception:
+        return raw_query
+
+# --- Sidebar ---
 with st.sidebar:
     st.title("Knowledge Base")
     st.markdown("Upload documents to ground responses in enterprise context.")
@@ -100,12 +121,21 @@ with st.sidebar:
                 os.makedirs(temp_dir, exist_ok=True)
                 temp_path = os.path.join(temp_dir, uploaded_file.name)
 
+                file_bytes = uploaded_file.getvalue()
                 with open(temp_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
+                    f.write(file_bytes)
 
-                file_size_kb = f"{round(len(uploaded_file.getbuffer()) / 1024, 1)} KB"
-
+                file_size_kb = f"{round(len(file_bytes) / 1024, 1)} KB"
                 ext = uploaded_file.name.split(".")[-1].lower()
+
+                if ext == "csv":
+                    try:
+                        import io
+                        df = pd.read_csv(io.BytesIO(file_bytes))
+                        st.session_state.indexed_dataframes[uploaded_file.name] = df
+                    except Exception:
+                        pass
+
                 try:
                     if ext == "pdf":
                         loader = PyPDFLoader(temp_path)
@@ -122,7 +152,7 @@ with st.sidebar:
                     raw_docs = []
 
                 if raw_docs:
-                    splitter = RecursiveCharacterTextSplitter(chunk_size=450, chunk_overlap=50)
+                    splitter = RecursiveCharacterTextSplitter(chunk_size=900, chunk_overlap=150)
                     chunks = splitter.split_documents(raw_docs)
 
                     chunk_ids = []
@@ -145,7 +175,8 @@ with st.sidebar:
                     st.session_state.indexed_docs_meta[uploaded_file.name] = {
                         "chunks": len(chunks),
                         "size": file_size_kb,
-                        "ids": chunk_ids
+                        "ids": chunk_ids,
+                        "type": ext
                     }
                     st.success(f"Indexed {len(chunks)} chunks from {uploaded_file.name}!")
 
@@ -166,9 +197,16 @@ with st.sidebar:
                     if st.session_state.vector_store is not None:
                         st.session_state.vector_store.delete(ids=meta["ids"])
                     del st.session_state.indexed_docs_meta[fname]
+                    if fname in st.session_state.indexed_dataframes:
+                        del st.session_state.indexed_dataframes[fname]
                     if len(st.session_state.indexed_docs_meta) == 0:
                         st.session_state.vector_store = None
                     st.rerun()
+
+            if fname in st.session_state.indexed_dataframes:
+                with st.expander(f"📊 Preview: {fname}"):
+                    st.dataframe(st.session_state.indexed_dataframes[fname].head(5), use_container_width=True)
+
             st.markdown("<hr style='margin: 4px 0;' />", unsafe_allow_html=True)
     else:
         st.caption("No documents currently active in this session.")
@@ -194,22 +232,22 @@ with st.sidebar:
         st.session_state.chat_history = []
         st.session_state.vector_store = None
         st.session_state.indexed_docs_meta = {}
+        st.session_state.indexed_dataframes = {}
         st.rerun()
 
 # --- Main Window Interface ---
 st.header("Enterprise Assistant")
 
-for msg in st.session_state.ui_messages:
+for idx, msg in enumerate(st.session_state.ui_messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if "sources" in msg and msg["sources"]:
             with st.expander("🔍 View Retrieved Sources"):
                 for src in msg["sources"]:
-                    st.markdown(f"<span class='source-tag'>Source: {src['source']} (Page {src['page']})</span> • Relevance: `{src['score']}%`", unsafe_allow_html=True)
+                    st.markdown(f"<span class='source-tag'>Source: {src['source']} (Page {src['page']})</span>", unsafe_allow_html=True)
                     st.caption(src["text"])
                     st.markdown("---")
 
-# Clickable starter chips shown strictly before the first user question
 chip_prompt = None
 if st.session_state.indexed_docs_meta and len(st.session_state.ui_messages) <= 1:
     st.markdown("**Suggested Prompts:**")
@@ -224,38 +262,48 @@ if st.session_state.indexed_docs_meta and len(st.session_state.ui_messages) <= 1
         if st.button("📅 Extract Dates & Milestones", use_container_width=True):
             chip_prompt = "List all dates, timelines, and milestones mentioned in these documents."
 
-user_prompt = st.chat_input("Ask about your documents...") or chip_prompt
+regenerate_prompt = None
+if len(st.session_state.ui_messages) > 1 and st.session_state.ui_messages[-1]["role"] == "assistant":
+    if st.button("🔄 Regenerate Last Response", key="regen_btn"):
+        for m in reversed(st.session_state.ui_messages):
+            if m["role"] == "user":
+                regenerate_prompt = m["content"]
+                st.session_state.ui_messages.pop()
+                if st.session_state.chat_history and isinstance(st.session_state.chat_history[-1], AIMessage):
+                    st.session_state.chat_history.pop()
+                break
+
+user_prompt = regenerate_prompt or st.chat_input("Ask about your documents...") or chip_prompt
 
 if user_prompt:
     if st.session_state.vector_store is None or not st.session_state.indexed_docs_meta:
         st.warning("Please upload and index at least one document in the sidebar first!")
         st.stop()
 
-    st.session_state.ui_messages.append({"role": "user", "content": user_prompt})
-    with st.chat_message("user"):
-        st.markdown(user_prompt)
+    if not regenerate_prompt:
+        st.session_state.ui_messages.append({"role": "user", "content": user_prompt})
+        with st.chat_message("user"):
+            st.markdown(user_prompt)
 
     with st.chat_message("assistant"):
-        docs_and_scores = st.session_state.vector_store.similarity_search_with_relevance_scores(user_prompt, k=4)
-        
+        search_query = expand_query(user_prompt, groq_key)
+        matched_docs = st.session_state.vector_store.similarity_search(search_query, k=6)
+
         structured_sources = []
         context_pieces = []
-        for doc, score in docs_and_scores:
-            rel_percentage = round((score if score is not None else 0.85) * 100, 1)
-            if rel_percentage >= 45.0:
-                page_val = doc.metadata.get("page_number", doc.metadata.get("page", 1))
-                source_name = doc.metadata.get("source_name", "Document")
-                
-                structured_sources.append({
-                    "source": source_name,
-                    "page": page_val,
-                    "score": max(0, min(100, rel_percentage)),
-                    "text": doc.page_content
-                })
-                context_pieces.append(f"[{source_name} - Page {page_val}]:\n{doc.page_content}")
+        for doc in matched_docs:
+            source_name = doc.metadata.get("source_name", "Document")
+            page_val = doc.metadata.get("page_number", doc.metadata.get("page", 1))
+
+            structured_sources.append({
+                "source": source_name,
+                "page": page_val,
+                "text": doc.page_content
+            })
+            context_pieces.append(f"[{source_name} - Page {page_val}]:\n{doc.page_content}")
 
         if not context_pieces:
-            fallback_answer = "The indexed documents do not contain sufficiently relevant information to answer this question."
+            fallback_answer = "The indexed documents do not contain information related to this question."
             st.markdown(fallback_answer)
             st.session_state.ui_messages.append({
                 "role": "assistant",
@@ -274,14 +322,17 @@ if user_prompt:
 
             qa_prompt = ChatPromptTemplate.from_messages([
                 ("system", 
-                 "You are an enterprise knowledge assistant. Answer the user question accurately using ONLY the provided context snippets.\n"
+                 "You are an enterprise knowledge assistant. Answer the user question accurately using the provided context snippets.\n"
+                 "Analyze job titles, organization headers, dates, and related context thoroughly.\n"
+                 "Formatting rules:\n"
+                 "- Use standard Markdown only. Never output raw HTML tags like <br>, <br/>, or <div>.\n"
+                 "- Format bullet points using regular markdown lists (- item).\n"
                  "If the answer cannot be determined from the context, state that clearly.\n\n"
                  "Context Snippets:\n{context}"),
                 MessagesPlaceholder(variable_name="chat_history"),
                 ("human", "{question}")
             ])
 
-            # Extract memory locally to preserve thread safety in Streamlit
             recent_history = list(st.session_state.get("chat_history", []))[-6:]
 
             rag_chain = (
@@ -296,9 +347,14 @@ if user_prompt:
             )
 
             try:
-                answer = st.write_stream(rag_chain.stream(user_prompt))
+                def clean_stream():
+                    for chunk in rag_chain.stream(user_prompt):
+                        yield chunk.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
 
-                st.session_state.chat_history.append(HumanMessage(content=user_prompt))
+                answer = st.write_stream(clean_stream())
+
+                if not regenerate_prompt:
+                    st.session_state.chat_history.append(HumanMessage(content=user_prompt))
                 st.session_state.chat_history.append(AIMessage(content=answer))
 
             except Exception as e:
@@ -308,7 +364,7 @@ if user_prompt:
             if structured_sources:
                 with st.expander("🔍 View Retrieved Sources"):
                     for src in structured_sources:
-                        st.markdown(f"<span class='source-tag'>Source: {src['source']} (Page {src['page']})</span> • Relevance: `{src['score']}%`", unsafe_allow_html=True)
+                        st.markdown(f"<span class='source-tag'>Source: {src['source']} (Page {src['page']})</span>", unsafe_allow_html=True)
                         st.caption(src["text"])
                         st.markdown("---")
 
