@@ -90,7 +90,7 @@ with st.sidebar:
     if st.session_state.indexed_files:
         st.markdown("**Currently Indexed in This Session:**")
         for f in set(st.session_state.indexed_files):
-            st.caption(f"• {f}")
+            st.caption(f"â€¢ {f}")
 
     if st.button("Clear Chat & Session", use_container_width=True):
         st.session_state.messages = [
