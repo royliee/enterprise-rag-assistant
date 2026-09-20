@@ -145,7 +145,7 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
             sources = [doc.page_content for doc in retrieved_docs]
 
             llm = ChatGroq(
-                model_name="llama-3.3-70b-versatile",
+                model_name="llama-3.1-8b-instant",
                 groq_api_key=groq_key,
                 temperature=0.1
             )
