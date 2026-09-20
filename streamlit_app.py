@@ -1,4 +1,4 @@
-﻿import os
+import os
 import uuid
 import streamlit as st
 from dotenv import load_dotenv
@@ -12,7 +12,7 @@ from langchain_core.runnables import RunnablePassthrough
 
 load_dotenv()
 
-st.set_page_config(page_title="Enterprise Doc AI", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Enterprise Doc AI", page_icon="??", layout="wide")
 
 # API Key handling
 api_key = None
@@ -47,7 +47,7 @@ def get_embeddings():
 
 # --- Sidebar: Document Management ---
 with st.sidebar:
-    st.title("📁 Document Knowledge Base")
+    st.title("?? Document Knowledge Base")
     st.markdown("Upload documents (PDF, TXT) to ground the AI responses.")
 
     uploaded_file = st.file_uploader("Upload a document", type=["pdf", "txt"])
@@ -90,7 +90,7 @@ with st.sidebar:
     if st.session_state.indexed_files:
         st.markdown("**Currently Indexed in This Session:**")
         for f in set(st.session_state.indexed_files):
-            st.caption(f"• {f}")
+            st.caption(f"� {f}")
 
     if st.button("Clear Chat & Session", use_container_width=True):
         st.session_state.messages = [
@@ -101,7 +101,7 @@ with st.sidebar:
         st.rerun()
 
 # --- Main Window: ChatGPT Interface ---
-st.header("💬 Enterprise Assistant")
+st.header("?? Enterprise Assistant")
 
 if "messages" not in st.session_state:
     st.session_state.messages = [
@@ -112,7 +112,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if "sources" in msg and msg["sources"]:
-            with st.expander("🔍 View Retrieved Sources"):
+            with st.expander("?? View Retrieved Sources"):
                 for idx, src in enumerate(msg["sources"], 1):
                     st.caption(f"**Chunk {idx}:**")
                     st.text(src)
@@ -133,7 +133,7 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
             sources = [doc.page_content for doc in retrieved_docs]
 
             llm = ChatGoogleGenerativeAI(
-                model="gemini-3.6-flash",
+                model="gemini-1.5-flash",
                 google_api_key=api_key
             )
 
@@ -157,7 +157,7 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
             st.markdown(answer)
 
             if sources:
-                with st.expander("🔍 View Retrieved Sources"):
+                with st.expander("?? View Retrieved Sources"):
                     for idx, src in enumerate(sources, 1):
                         st.caption(f"**Chunk {idx}:**")
                         st.text(src)
