@@ -1,3 +1,4 @@
+from pathlib import Path
 import os
 import glob
 import shutil
@@ -21,7 +22,7 @@ gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 # Storage Directories
 BASE_DIR = os.getcwd()
-PRIMARY_DOCS_DIR = os.path.join(BASE_DIR, "mcp_data", "documents")
+BASE_DIR = Path(__file__).resolve().parent; PRIMARY_DOCS_DIR = os.path.join(BASE_DIR, "mcp_data", "documents")
 ALT_DOCS_DIR = os.path.join(BASE_DIR, "data", "docs")
 PERSIST_DIR = os.path.join(BASE_DIR, "mcp_data", "chroma_db")
 
@@ -253,3 +254,4 @@ def get_kb_schema() -> str:
 if __name__ == "__main__":
     # Runs the standard stdio MCP transport for agent hosts (Claude Desktop, OpenClaw, Cursor)
     mcp.run()
+
