@@ -1,0 +1,11 @@
+﻿services:
+  rag-app:
+    build: .
+    container_name: local-rag-agent
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    volumes:
+      - ./mcp_data:/app/mcp_data
+    restart: unless-stopped
