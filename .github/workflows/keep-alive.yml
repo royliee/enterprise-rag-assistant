@@ -12,5 +12,5 @@ jobs:
     steps:
       - name: Ping Streamlit App
         run: |
-          curl -sL "https://<your-app-url>" > /dev/null
+          curl -sL "https://royliee-rag-assistant.streamlit.app" > /dev/null
           echo "Streamlit ping completed successfully at $(date)."
