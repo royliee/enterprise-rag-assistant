@@ -4,7 +4,7 @@ on:
   schedule:
     # Runs every 8 hours (00:00, 08:00, 16:00 UTC)
     - cron: "0 0,8,16 * * *"
-  workflow_dispatch: # Allows manual trigger from GitHub Actions UI
+  workflow_dispatch:
 
 jobs:
   ping:
@@ -12,5 +12,8 @@ jobs:
     steps:
       - name: Ping Streamlit App
         run: |
-          curl -sL "https://royliee-rag-assistant.streamlit.app" > /dev/null
-          echo "Streamlit ping completed successfully at $(date)."
+          curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            --max-time 30 \
+            --max-redirs 3 \
+            "https://royliee-rag-assistant.streamlit.app" > /dev/null || true
+          echo "Streamlit ping sent successfully."
